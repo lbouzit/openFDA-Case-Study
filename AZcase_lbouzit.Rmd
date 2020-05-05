@@ -1,0 +1,233 @@
+---
+title: 'AZ Case Study: openFDA Analysis'
+author: "Lilia Bouzit"
+date: "5/4/2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include=FALSE}
+require(jsonlite)
+require(dplyr)
+require(ggplot2)
+require(lubridate)
+require(ggcorrplot)
+require(reshape2)
+require(tidyverse)
+```
+
+## Are different adverse events associated with different auto-immune disorders?
+
+I am interested in looking at the different adverse events associated with different diseases, specifically auto-immune disorders that are commonly treated with pharmaceuticals. In this exploration, I will use the openFDA web API to pull reports with the following diseases listed as a drug indication:
+Rheumatoid arthritis
+Psoriasis
+Crohn's disease
+Lupus
+Multiple Sclerosis
+Ulcerative Colitis
+Ankylosing spondylitis
+
+Then, I will examine the adverse events that appear on the same reports. After testing out several search terms for the seven diseases by querying the web API, I decided on the query search below. Due to limitations in how many records one can pull from the web API at a time, I decided to limit the time frame of interest to 6-month window in 2019. Then, I looked up the total report count for my search term from the 'total' field in the 'meta' object of the JSON record.
+
+```{r,  warning=FALSE, cache=TRUE}
+get.meta<-fromJSON("https://api.fda.gov/drug/event.json?search=(receivedate:[20190101+TO+20190630])+AND+patient.patientonsetage:[18+TO+110]+AND+_exists_:patient.reaction.reactionmeddrapt+(patient.drug.drugindication:\"rheumatoid+arthritis\"+\"psoriasis\"+crohn+lupus+sclerosis+\"colitis+ulcerative\"+\"ankylosing+spondylitis\")&limit=1")
+
+```
+There are `r get.meta$meta$results$total` reports found from this query. However, there are limitations in place on the number of reports that can be downloaded from one query, the max is 100 reports. For a more thorough project (and with the appropriate computational resources), it would be ideal to use the downloads provided by openFDA and create a relational database. For the purposes of this case study, I will make use of the 'skip' parameter to pull more paginated reports. 
+
+### Loading in the data 
+
+First, I initialize a dataframe that converted the JSON data to nested dataframe objects. Then, I run a script to add more pages of 100 reports for a total of 25,000 reports. 
+```{r, warning=FALSE, cache=TRUE}
+dt.init<-fromJSON("https://api.fda.gov/drug/event.json?search=_exists_:patient.drug.drugindication+AND+_exists_:patient.reaction.reactionmeddrapt+AND+receivedate:[20190101+TO+20190630]+AND+patient.patientonsetage:[18+TO+110]+AND+(patient.drug.drugindication:\"rheumatoid+arthritis\"+\"psoriasis\"+crohn+lupus+sclerosis+\"colitis+ulcerative\"+\"ankylosing+spondylitis\")&limit=100")
+
+dt.init2<-fromJSON("https://api.fda.gov/drug/event.json?search=_exists_:patient.drug.drugindication+AND+_exists_:patient.reaction.reactionmeddrapt+AND+receivedate:[20190101+TO+20190630]+AND+patient.patientonsetage:[18+TO+110]+AND+(patient.drug.drugindication:\"rheumatoid+arthritis\"+\"psoriasis\"+crohn+lupus+sclerosis+\"colitis+ulcerative\"+\"ankylosing+spondylitis\")&limit=100&skip=100")
+
+
+dt <- rbind_pages(list(dt.init$results$patient, dt.init2$results$patient))
+
+for(i in seq(3:250)){
+  
+  temp<-fromJSON(sprintf("https://api.fda.gov/drug/event.json?search=_exists_:patient.drug.drugindication+AND+_exists_:patient.reaction.reactionmeddrapt+AND+receivedate:[20190101+TO+20190630]+AND+patient.patientonsetage:[18+TO+105]+AND+(patient.drug.drugindication:\"rheumatoid+arthritis\"+\"psoriasis\"+crohn+lupus+sclerosis+\"colitis+ulcerative\"+\"ankylosing+spondylitis\")&limit=100&skip=%s", as.character(i*100)) )
+  
+  dt<-rbind_pages(list(dt, temp$results$patient))
+  
+}
+```
+
+### Converting the JSON objects to a dataframe
+
+To explore my question, I am interested in the 'drugindication' field to represent the disease and the 'reactionmeddrapt' field to represent the adverse event. I select these two fields, keep track of their relationship with an event ID counter, and create a data frame in long format. I also remove any occurence of the diseases in the adverse event field in order to focus on insights of other adverse events. 
+
+
+
+```{r, warning=FALSE, cache=TRUE}
+
+ind_name<-c()
+reac_name<-c()
+eventid<-c(seq(1:25000))
+id1<-c()
+id2<-c()
+for(i in seq(1:25000)){
+  l1<-list(unique(dt$drug[[i]]$drugindication))
+  ind_name[i]<-l1
+  id1[i]<-list(c(rep(i, length(unlist(l1)))))
+  
+  l2<-list(dt$reaction[[i]]$reactionmeddrapt)
+  reac_name[i]<-l2   
+  id2[i]<-list(c(rep(i, length(unlist(l2)))))
+
+}
+
+diseases<-c("RHEUMATOID ARTHRITIS", "PSORIASIS", "COLITIS ULCERATIVE", "CROHN^S DISEASE", "SYSTEMIC LUPUS ERYTHEMATOSUS", "MULTIPLE SCLEROSIS", "ANKYLOSING SPONDYLITIS")
+
+reaction<-as.data.frame(cbind(unlist(id2), unlist(reac_name)))
+names(reaction)<-c("eventid", "reac_name")
+reaction$reac_name<-toupper(reaction$reac_name)
+reaction <- reaction %>% filter(!(reac_name %in% diseases))
+
+indication<-as.data.frame(cbind(unlist(id1), unlist(ind_name)))
+names(indication)<-c("eventid", "ind_name")
+
+
+reac.hits<- reaction %>% group_by(reac_name) %>% summarise(n.reac=n())  %>% arrange(desc(n.reac))
+ind.hits<- indication %>% group_by(ind_name) %>% summarise(n.ind=n())  %>% arrange(desc(n.ind))
+
+```
+
+In this sample of reports, there are `r length(unique(reaction$reac_name))` unique adverse events recorded, and `r length(unique(indication$ind_name))` unique drug indications reported. 
+
+Finally, I look at the data by tabulating the 15 most common adverse events or reactions and 15 most common drug indications. As expected, all the auto-immune diseases will appear in the top 15, and other represented indications could be comorbidities of the patient population captured by these case reports.
+
+```{r}
+print(reac.hits[1:15,])
+print(ind.hits[1:15,])
+```
+
+### Initial summary statistics 
+
+Now, I prepare the data for further examination of the associations between adverse events and diseases. Using the event ID key, I find the counts of each adverse event for each disease. There is variation in the number of reports for each disease and therefore the counts are converted to proportions, in which the denominators are the number of reports for each disease.
+
+Next, I compute and print summary statistics to examine the distribution of event frequencies. 
+
+```{r, warning=FALSE}
+dt.merge<-merge(reaction, indication, by="eventid")
+dt.merge<-na.omit(dt.merge)
+dt.agg <- as.data.frame(dt.merge %>% group_by(ind_name, reac_name) %>% count(reac_name))
+
+diseases.count.temp<-c()
+for(i in seq(1:length(diseases))){
+  diseases.count.temp[i]<-table(indication$ind_name)[paste(diseases[i])]
+}
+diseases.count<-cbind(diseases, diseases.count.temp)
+
+dt.prop<-merge(dt.agg, diseases.count, by.x="ind_name", by.y="diseases")
+dt.prop$n.prop<-dt.prop$n/as.integer(as.character(dt.prop$diseases.count))
+
+dt.prop.filt <- dt.prop %>% filter((ind_name %in% diseases))
+dt.prop.filt<-droplevels(dt.prop.filt)
+
+summary.stats<-dt.prop.filt  %>% group_by(ind_name) %>% summarize(mean = mean(n.prop), sd = sd(n.prop), min=min(n.prop), median=median(n.prop), max=max(n.prop))
+summary.stats
+
+quantile(dt.prop.filt$n.prop, c(.90, .95, .99))
+```
+
+
+There are over 11,000 pairs of adverse events and diseases reported. The summary statistics show that the distribution of event frequencies are highly skewed, and there are many adverse events that are recorded with very low frequency. 99% of events each make up less than 3% of the total events. 
+
+
+### Visualize the most frequent adverse events
+
+Since there are thousands of pairs, I implement a very high threshold of 3% in order to visualize the 57 most common events in a heatmap for the seven diseases of interest. This will restrict the visualization to approximately the top 1% of hits. 
+```{r, warning=FALSE}
+dt.top.reac<-dt.prop[which(dt.prop$n.prop > 0.03),]
+dt.top.reac<-dt.top.reac[order(dt.top.reac$ind_name, dt.top.reac$reac_name),]
+
+top.heatmap <- ggplot(data = dt.top.reac, mapping = aes(x = ind_name, y = reac_name, fill = n.prop)) +
+  geom_tile() +
+   labs(
+    x = "Disease",
+    y = "Adverse Event",
+    fill = "Event Proportion")+
+  scale_fill_gradient(low = "blue", high = "red")+
+  theme(axis.text.x  = element_text(angle=90, hjust=1, size=6), axis.text.y  = element_text(size=6), aspect.ratio=1.8)+
+  scale_x_discrete(labels=c("ANKYLOSING SPONDYLITIS"="AS","COLITIS ULCERATIVE"="UC", "CROHN^S DISEASE"="CD", "MULTIPLE SCLEROSIS"="MS", "PSORIASIS"="PS", "RHEUMATOID ARTHRITIS"="RA", "SYSTEMIC LUPUS ERYTHEMATOSUS"="SLE"))
+top.heatmap
+```
+
+From this visualization, nausea, headache, drug ineffective, and diarrhoea appear to be common reactions to all diseases. Drug ineffective seems particularly high, especially for the rheumatoid arthritis drug indication. The differences between diseases is hard to interpret from this heatmap. 
+
+### Measure correlation 
+
+Next, we can check if the diseases are correlated with respect to the adverse events. This will first require that the data is transformed from long to wide format.
+```{r, warning=FALSE}
+dt.wide <- dcast(dt.prop.filt, reac_name~ind_name, value.var="n.prop")
+dt.wide[is.na(dt.wide)] <- 0
+
+cor.mat = cor(dt.wide[-1])
+cor.mat
+
+cor.mat.plot<- ggcorrplot(cor.mat) + scale_fill_gradient2(limit = c(0,1))
+cor.mat.plot
+```
+
+The low correlations with multiple sclerosis demonstrate that adverse events associated with the disease may be different than those with the other diseases. This may similarly be the case for lupus. There is evidence that many of the same adverse events are associated with rheumatoid arthritis, psoriasis, and ankylosing spondylitis. These associations could be mediated through drug use, given that many of the same medications (e.g. TNF inhibitors) are indicated for all of these conditions. 
+
+### Comparing the PRRs
+
+It is not possible to make any conclusions about causality from this data because the total number of cases with each drug indication and adverse event is unknown, in addition to important unmeasured confounding. However we could pursue a more targeted research hypothesis for one particular adverse event. The proportional reporting ratio (PRR) has been used to measure if an adverse event in more common for a particular drug than for all drugs in a database. This can be translated to measure if an adverse event is more common for a disease. Below, I calculate the PRR of diarrhoea for the seven auto-immune conditions of interest. 
+
+PRR:
+(m/n)/((M-m)/(N-n))
+
+Where:
+m is the reports with both disease and event
+n is reports with the disease
+M is reports with event in the data
+N is reports total in the data
+
+```{r, warning=FALSE, cache=TRUE}
+dt.M<-fromJSON("https://api.fda.gov/drug/event.json?search=_exists_:patient.drug.drugindication+AND+_exists_:patient.reaction.reactionmeddrapt+AND+receivedate:[20120101+TO+20191231]+AND+patient.patientonsetage:[18+TO+110]+AND+patient.reaction.reactionmeddrapt:diarrhoea&limit=1")
+  M<-dt.M$meta$results$total
+
+  dt.N<-fromJSON("https://api.fda.gov/drug/event.json?search=(receivedate:[20040101+TO+20191231])+AND+patient.patientonsetage:[18+TO+105]&limit=1")
+  N<-dt.N$meta$results$total
+
+    indication_query<-c("\"rheumatoid+arthritis\"", "\"psoriasis\"", "\"colitis+ulcerative\"", "\"crohn\"", "\"systemic+lupus+erythematosus\"", "\"multiple+sclerosis\"",  "\"ankylosing+spondylitis\"")
+    m<-c()
+    n<-c()
+  for (i in seq(1:length(indication_query))){
+    dt.m<-fromJSON(sprintf("https://api.fda.gov/drug/event.json?search=(receivedate:[20040101+TO+20191231])+AND+patient.patientonsetage:[18+TO+105]+AND+patient.reaction.reactionmeddrapt:diarrhoea+AND+patient.drug.drugindication:%s&limit=1", indication_query[i]))
+  m[i]<-dt.m$meta$results$total
+  
+  dt.n<-fromJSON(sprintf("https://api.fda.gov/drug/event.json?search=(receivedate:[20040101+TO+20191231])+AND+patient.patientonsetage:[18+TO+105]+AND+patient.drug.drugindication:%s&limit=1", indication_query[i]))
+  n[i]<-dt.n$meta$results$total
+  }
+    
+```
+
+```{r, warning=FALSE}
+  M<-as.numeric(as.character(M))
+  N<-as.numeric(as.character(N))
+
+  df.prr<-as.data.frame(cbind(diseases, m, n))
+ 
+  df.prr$m<-as.numeric(as.character(df.prr$m))
+  df.prr$n<-as.numeric(as.character(df.prr$n))
+  
+  df.prr$prr<-(df.prr$m/df.prr$n)/((M-df.prr$m)/(N-df.prr$n))
+  as_tibble(df.prr)
+```
+
+There are a total of `r M` reports with diarrhoea, and a total of `r N` reports overall. 
+
+From these results, it appears that diarrhoea is not more common among reports that mention rheumatoid arthritis or ankylosing spondylitis than it is among all reports. This is in contrast to psoriasis, ulcerative colitis, and crohn's disease, for which reports record diarrhoea more than twice as often. To a lesser extent, diarrhoea is also more commonly reported for systemic lupus erythematosus and multiple sclerosis. 
+
+
+
